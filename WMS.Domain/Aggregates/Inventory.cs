@@ -1,5 +1,8 @@
 namespace WMS.Domain.Aggregates;
-
+/*
+* 仓库
+* 2026年7月10日
+*/
 public class Inventory
 {
     public Guid Id { get; private set; }
