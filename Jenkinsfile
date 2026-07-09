@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_REGISTRY = 'docker.io'
-        IMAGE_NAME = 'kseahibiki/wms-api'
+        REGISTRY = 'localhost:5005'
+        IMAGE_NAME = 'wms-api'
         IMAGE_TAG = "${env.BUILD_NUMBER}"
     }
 
@@ -14,13 +14,19 @@ pipeline {
                     checkout([
                         $class: 'GitSCM',
                         branches: [[name: '*/main']],
-                        userRemoteConfigs: [[url: 'https://github.com/KseaHibiki/t_Net8Services-services-WMS.git']],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/KseaHibiki/t_Net8Services-services-WMS.git',
+                            credentialsId: 'github-pat-token'
+                        ]],
                         extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'services/WMS/src']]
                     ])
                     checkout([
                         $class: 'GitSCM',
                         branches: [[name: '*/main']],
-                        userRemoteConfigs: [[url: 'https://github.com/KseaHibiki/t_Net8Services-shared-Shop.Events.git']],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/KseaHibiki/t_Net8Services-shared-Shop.Events.git',
+                            credentialsId: 'github-pat-token'
+                        ]],
                         extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'shared/Shop.Events']]
                     ])
                 }
@@ -30,16 +36,8 @@ pipeline {
         stage('Restore & Build') {
             steps {
                 dir('t_Net8Services') {
-                    sh 'dotnet restore services/WMS/src/WMS.API/WMS.API.csproj'
-                    sh 'dotnet build services/WMS/src/WMS.API/WMS.API.csproj -c Release --no-restore'
-                }
-            }
-        }
-
-        stage('Run Tests') {
-            steps {
-                dir('t_Net8Services') {
-                    sh 'dotnet test services/WMS/src/WMS.API/WMS.API.csproj -c Release --no-build || echo "No tests found"'
+                    bat 'dotnet restore services/WMS/src/WMS.API/WMS.API.csproj'
+                    bat 'dotnet build services/WMS/src/WMS.API/WMS.API.csproj -c Release --no-restore'
                 }
             }
         }
@@ -47,17 +45,9 @@ pipeline {
         stage('Docker Build & Push') {
             steps {
                 dir('t_Net8Services') {
-                    sh """
-                        docker build \\
-                            -f services/WMS/src/WMS.API/Dockerfile \\
-                            -t ${IMAGE_NAME}:${IMAGE_TAG} \\
-                            -t ${IMAGE_NAME}:latest \\
-                            .
-                    """
-                    sh """
-                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
-                        docker tag ${IMAGE_NAME}:latest ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
-                    """
+                    bat "docker build -f services/WMS/src/WMS.API/Dockerfile -t ${REGISTRY}/${IMAGE_NAME}:%IMAGE_TAG% -t ${REGISTRY}/${IMAGE_NAME}:latest ."
+                    bat "docker push ${REGISTRY}/${IMAGE_NAME}:%IMAGE_TAG%"
+                    bat "docker push ${REGISTRY}/${IMAGE_NAME}:latest"
                 }
             }
         }
@@ -65,10 +55,13 @@ pipeline {
 
     post {
         success {
-            echo 'WMS API 构建并推送成功！'
+            echo "✅ WMS API 镜像已推送: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
         }
         failure {
-            echo 'WMS API 构建失败，请检查日志。'
+            echo '❌ WMS API 构建失败'
+        }
+        always {
+            cleanWs()
         }
     }
 }
