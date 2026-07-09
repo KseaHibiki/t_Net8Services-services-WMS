@@ -2,6 +2,10 @@ using MassTransit;
 using Shop.Events;
 using WMS.Domain.Aggregates;
 
+/*
+* 订单创建事件消费者
+*/
+
 namespace WMS.Application.Consumers;
 
 public class OrderCreatedConsumer : IConsumer<OrderCreatedEvent>
