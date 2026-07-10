@@ -1,10 +1,7 @@
 using MassTransit;
+using Serilog;
 using Shop.Events;
 using WMS.Domain.Aggregates;
-
-/*
-* 订单创建事件消费者
-*/
 
 namespace WMS.Application.Consumers;
 
@@ -21,44 +18,46 @@ public class OrderCreatedConsumer : IConsumer<OrderCreatedEvent>
 
     public async Task Consume(ConsumeContext<OrderCreatedEvent> context)
     {
-        var eventMessage = context.Message;
+        var evt = context.Message;
 
-        Console.WriteLine($"[WMS] Processing order {eventMessage.OrderId}, product {eventMessage.ProductId}, qty {eventMessage.Quantity}");
+        Log.Information("收到订单创建事件: OrderId={OrderId}, ProductId={ProductId}, Quantity={Quantity}",
+            evt.OrderId, evt.ProductId, evt.Quantity);
 
-        var inventory = await _inventoryRepository.GetByProductIdAsync(eventMessage.ProductId, context.CancellationToken);
+        var inventory = await _inventoryRepository.GetByProductIdAsync(evt.ProductId, context.CancellationToken);
 
         if (inventory is null)
         {
-            Console.WriteLine($"[WMS] Inventory not found for product {eventMessage.ProductId}. Publishing StockInsufficientEvent.");
+            Log.Warning("库存记录未找到，发布库存不足事件: ProductId={ProductId}", evt.ProductId);
             await _publishEndpoint.Publish(new StockInsufficientEvent(
-                eventMessage.OrderId,
-                eventMessage.ProductId,
-                eventMessage.Quantity,
-                DateTime.UtcNow), context.CancellationToken);
+                evt.OrderId, evt.ProductId, evt.Quantity, DateTime.UtcNow), context.CancellationToken);
             return;
         }
 
         try
         {
-            inventory.Deduct(eventMessage.Quantity);
+            inventory.Deduct(evt.Quantity);
             await _inventoryRepository.UpdateAsync(inventory, context.CancellationToken);
 
             await _publishEndpoint.Publish(new StockDeductedEvent(
-                eventMessage.OrderId,
-                eventMessage.ProductId,
-                eventMessage.Quantity,
-                DateTime.UtcNow), context.CancellationToken);
+                evt.OrderId, evt.ProductId, evt.Quantity, DateTime.UtcNow), context.CancellationToken);
 
-            Console.WriteLine($"[WMS] Stock deducted for order {eventMessage.OrderId}. Available: {inventory.AvailableQuantity}");
+            Log.Information("库存扣减成功: OrderId={OrderId}, ProductId={ProductId}, Available={Available}",
+                evt.OrderId, evt.ProductId, inventory.AvailableQuantity);
+
+            if (inventory.AvailableQuantity < 100)
+            {
+                inventory.Replenish(500);
+                await _inventoryRepository.UpdateAsync(inventory, context.CancellationToken);
+                Log.Information("库存不足 100，自动补充 500 件: ProductId={ProductId}, Available={Available}",
+                    evt.ProductId, inventory.AvailableQuantity);
+            }
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException ex)
         {
-            Console.WriteLine($"[WMS] Insufficient stock for product {eventMessage.ProductId}. Publishing StockInsufficientEvent.");
+            Log.Warning(ex, "库存不足，无法扣减: ProductId={ProductId}, Requested={Requested}, Available={Available}",
+                evt.ProductId, evt.Quantity, inventory.AvailableQuantity);
             await _publishEndpoint.Publish(new StockInsufficientEvent(
-                eventMessage.OrderId,
-                eventMessage.ProductId,
-                eventMessage.Quantity,
-                DateTime.UtcNow), context.CancellationToken);
+                evt.OrderId, evt.ProductId, evt.Quantity, DateTime.UtcNow), context.CancellationToken);
         }
     }
 }

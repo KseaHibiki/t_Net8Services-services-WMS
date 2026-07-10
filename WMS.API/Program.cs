@@ -1,10 +1,25 @@
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
+using Serilog;
 using WMS.Application.Consumers;
 using WMS.Domain.Aggregates;
 using WMS.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
+
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .Enrich.WithProperty("Service", "WMS.API")
+    .WriteTo.Console(outputTemplate:
+        "[{Timestamp:HH:mm:ss} {Level:u3}] {Service} | {Message:lj}{NewLine}{Exception}")
+    .WriteTo.File("logs/wms-api-.log",
+        rollingInterval: RollingInterval.Day,
+        outputTemplate:
+        "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Service} | {Message:lj}{NewLine}{Exception}")
+    .CreateLogger();
+
+builder.Host.UseSerilog();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -38,11 +53,11 @@ builder.Services.AddMassTransit(x =>
 
 var app = builder.Build();
 
-// Auto-migrate in development
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<WmsDbContext>();
     db.Database.EnsureCreated();
+    Log.Information("数据库初始化完成 (wms_db)");
 }
 
 if (app.Environment.IsDevelopment())
@@ -51,5 +66,9 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseSerilogRequestLogging();
+
 app.MapControllers();
+
+Log.Information("WMS.API 启动完成，监听端口 5002");
 app.Run();
