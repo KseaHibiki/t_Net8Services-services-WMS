@@ -5,20 +5,20 @@ using WMS.Domain.Aggregates;
 
 namespace WMS.Application.Consumers;
 
-public class OrderCreatedConsumer : IConsumer<OrderCreatedEvent>
+public class OrderPaidConsumer : IConsumer<OrderPaidEvent>
 {
     private readonly IInventoryRepository _inventoryRepository;
 
-    public OrderCreatedConsumer(IInventoryRepository inventoryRepository)
+    public OrderPaidConsumer(IInventoryRepository inventoryRepository)
     {
         _inventoryRepository = inventoryRepository;
     }
 
-    public async Task Consume(ConsumeContext<OrderCreatedEvent> context)
+    public async Task Consume(ConsumeContext<OrderPaidEvent> context)
     {
         var evt = context.Message;
 
-        Log.Information("收到订单创建事件: OrderId={OrderId}, ProductId={ProductId}, Quantity={Quantity}",
+        Log.Information("收到订单支付事件，开始扣减库存: OrderId={OrderId}, ProductId={ProductId}, Quantity={Quantity}",
             evt.OrderId, evt.ProductId, evt.Quantity);
 
         var inventory = await _inventoryRepository.GetByProductIdAsync(evt.ProductId, context.CancellationToken);
