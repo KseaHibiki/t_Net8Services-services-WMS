@@ -1,3 +1,4 @@
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using WMS.Domain.Aggregates;
 
@@ -22,5 +23,9 @@ public class WmsDbContext : DbContext
             b.Property(i => i.AvailableQuantity).IsRequired();
             b.Property(i => i.ReservedQuantity).IsRequired();
         });
+
+        modelBuilder.AddInboxStateEntity();
+        modelBuilder.AddOutboxMessageEntity();
+        modelBuilder.AddOutboxStateEntity();
     }
 }

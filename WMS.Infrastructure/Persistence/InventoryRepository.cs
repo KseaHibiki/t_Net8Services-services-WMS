@@ -23,9 +23,14 @@ public class InventoryRepository : IInventoryRepository
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task UpdateAsync(Inventory inventory, CancellationToken cancellationToken = default)
+    public Task UpdateAsync(Inventory inventory, CancellationToken cancellationToken = default)
     {
         _dbContext.Inventories.Update(inventory);
+        return Task.CompletedTask;
+    }
+
+    public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 }

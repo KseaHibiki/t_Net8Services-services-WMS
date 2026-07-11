@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Serilog;
 using WMS.Domain.Aggregates;
+using StackExchange.Redis;
+using System.Text.Json;
 
 namespace WMS.API.Controllers;
 
@@ -9,10 +11,22 @@ namespace WMS.API.Controllers;
 public class InventoryController : ControllerBase
 {
     private readonly IInventoryRepository _inventoryRepository;
+    private readonly IDatabase _redis;
+    private readonly IConfiguration _configuration;
 
-    public InventoryController(IInventoryRepository inventoryRepository)
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    public InventoryController(
+        IInventoryRepository inventoryRepository,
+        IConnectionMultiplexer redis,
+        IConfiguration configuration)
     {
         _inventoryRepository = inventoryRepository;
+        _redis = redis.GetDatabase();
+        _configuration = configuration;
     }
 
     [HttpGet("{productId:guid}")]
@@ -20,6 +34,18 @@ public class InventoryController : ControllerBase
     {
         Log.Information("查询库存: ProductId={ProductId}", productId);
 
+        var cacheKey = $"inventory:{productId}";
+        var ttl = _configuration.GetValue<int>("RedisCache:InventoryTtlSeconds", 30);
+
+        // 尝试从 Redis 缓存读取
+        var cached = await _redis.StringGetAsync(cacheKey);
+        if (cached.HasValue)
+        {
+            Log.Information("库存缓存命中: ProductId={ProductId}", productId);
+            return Ok(System.Text.Json.JsonSerializer.Deserialize<object>(cached!));
+        }
+
+        // 缓存未命中，查数据库
         var inventory = await _inventoryRepository.GetByProductIdAsync(productId);
         if (inventory is null)
         {
@@ -27,16 +53,22 @@ public class InventoryController : ControllerBase
             return NotFound(new { Message = $"Inventory for product {productId} not found." });
         }
 
-        Log.Information("库存查询结果: ProductId={ProductId}, Available={Available}, Reserved={Reserved}",
-            productId, inventory.AvailableQuantity, inventory.ReservedQuantity);
-
-        return Ok(new
+        var result = new
         {
             inventory.Id,
             inventory.ProductId,
             inventory.AvailableQuantity,
             inventory.ReservedQuantity
-        });
+        };
+
+        // 写入缓存
+        var json = System.Text.Json.JsonSerializer.Serialize(result, JsonOptions);
+        await _redis.StringSetAsync(cacheKey, json, TimeSpan.FromSeconds(ttl));
+
+        Log.Information("库存查询结果: ProductId={ProductId}, Available={Available}, Reserved={Reserved}",
+            productId, inventory.AvailableQuantity, inventory.ReservedQuantity);
+
+        return Ok(result);
     }
 
     [HttpPost("seed")]

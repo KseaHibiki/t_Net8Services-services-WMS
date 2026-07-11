@@ -1,6 +1,7 @@
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
+using StackExchange.Redis;
 using WMS.Application.Consumers;
 using WMS.Domain.Aggregates;
 using WMS.Infrastructure.Persistence;
@@ -25,6 +26,11 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// Redis
+var redisConnectionString = builder.Configuration.GetConnectionString("redis")
+    ?? "localhost:6379";
+builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(redisConnectionString));
+
 // Database
 var connectionString = builder.Configuration.GetConnectionString("wms")
     ?? "Server=localhost;Port=3307;Database=wms_db;User=root;Password=114514;";
@@ -37,15 +43,41 @@ builder.Services.AddScoped<IInventoryRepository, InventoryRepository>();
 // MassTransit
 builder.Services.AddMassTransit(x =>
 {
+    x.AddConsumer<OrderPaidConsumer>();
     x.AddConsumer<OrderCreatedConsumer>();
+
+    x.AddEntityFrameworkOutbox<WmsDbContext>(o =>
+    {
+        o.QueryDelay = TimeSpan.FromSeconds(1);
+        o.UseMySql();
+    });
 
     x.UsingRabbitMq((context, cfg) =>
     {
         cfg.Host(builder.Configuration.GetConnectionString("rabbitmq")
             ?? "amqp://guest:guest@localhost:5672/");
 
+        cfg.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
+
+        cfg.ReceiveEndpoint("wms-order-paid-queue", e =>
+        {
+            e.Durable = true;
+            e.AutoDelete = false;
+            e.PurgeOnStartup = false;
+
+            e.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
+
+            e.ConfigureConsumer<OrderPaidConsumer>(context);
+        });
+
         cfg.ReceiveEndpoint("wms-order-created-queue", e =>
         {
+            e.Durable = true;
+            e.AutoDelete = false;
+            e.PurgeOnStartup = false;
+
+            e.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
+
             e.ConfigureConsumer<OrderCreatedConsumer>(context);
         });
     });
