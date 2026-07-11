@@ -56,10 +56,24 @@ curl http://localhost:53345/api/inventory/550e8400-e29b-41d4-a716-446655440000
 - 控制台输出：`[{Timestamp:HH:mm:ss} {Level:u3}] {Service} | {Message}`
 - 文件输出：`logs/wms-api-{yyyyMMdd}.log`（按天滚动）
 
+## 环境配置
+
+服务通过 `appsettings.json` + `appsettings.{Environment}.json` 实现多环境配置，由 `ASPNETCORE_ENVIRONMENT` 环境变量控制。
+
+| 配置文件 | 环境 | 日志级别 | 数据库连接 | Redis TTL |
+|----------|:----:|:--------:|:----------:|:---------:|
+| `appsettings.json` | 基础 | — | Docker 内部 | 30s |
+| `appsettings.Development.json` | Development | Debug | `localhost:3307` | 120s |
+| `appsettings.Production.json` | Production | Warning | — | 30s |
+
 ## 启动
 
 ```bash
+# Development 模式（默认）
 dotnet run --project WMS.API/WMS.API.csproj
+
+# 或指定环境
+ASPNETCORE_ENVIRONMENT=Development dotnet run --project WMS.API/WMS.API.csproj
 ```
 
 Swagger: `http://localhost:53345/swagger`

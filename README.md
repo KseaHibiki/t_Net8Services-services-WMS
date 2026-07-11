@@ -236,9 +236,22 @@ ASPNETCORE_ENVIRONMENT=Development
 
 API 地址：`http://localhost:53345/swagger`
 
+## 环境配置
+
+服务通过 `appsettings.json` + `appsettings.{Environment}.json` 实现多环境配置，由 `ASPNETCORE_ENVIRONMENT` 环境变量控制。
+
+| 配置文件 | 适用环境 | 日志级别 | EF Core SQL 日志 | 数据库连接 | Redis 库存 TTL |
+|----------|:--------:|:--------:|:----------------:|:----------:|:--------------:|
+| `appsettings.json` | 基础公共 | — | — | Docker 内部 `wms-mysql` | 30s |
+| `appsettings.Development.json` | Development | Debug | 开启 | `localhost:3307` | 120s |
+| `appsettings.Production.json` | Production | Warning | 关闭 | Docker 内部 (环境变量覆写) | 30s |
+
+> `docker-compose.yml` 中设置 `ASPNETCORE_ENVIRONMENT=Development`，`docker-compose.prod.yml` 中设置为 `Production`。
+> 生产环境连接字符串通过 Docker 环境变量 `ConnectionStrings__wms`、`ConnectionStrings__rabbitmq` 等覆写。
+
 ### 连接字符串配置
 
-`appsettings.json` 中可配置：
+基础 `appsettings.json`：
 
 ```json
 {
@@ -253,7 +266,15 @@ API 地址：`http://localhost:53345/swagger`
 }
 ```
 
-> 本地开发时可修改 `wms` 连接串为 `Server=localhost;Port=3307`，RabbitMQ 为 `localhost`。
+Development 环境 (`appsettings.Development.json`) 自动覆写为本地地址：
+
+```json
+{
+  "ConnectionStrings": {
+    "wms": "Server=localhost;Port=3307;Database=wms_db;User=root;Password=114514;"
+  }
+}
+```
 
 ## 项目结构
 
