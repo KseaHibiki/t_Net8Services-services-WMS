@@ -44,7 +44,6 @@ builder.Services.AddScoped<IInventoryRepository, InventoryRepository>();
 builder.Services.AddMassTransit(x =>
 {
     x.AddConsumer<OrderPaidConsumer>();
-    x.AddConsumer<OrderCreatedConsumer>();
 
     x.AddEntityFrameworkOutbox<WmsDbContext>(o =>
     {
@@ -68,17 +67,6 @@ builder.Services.AddMassTransit(x =>
             e.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
 
             e.ConfigureConsumer<OrderPaidConsumer>(context);
-        });
-
-        cfg.ReceiveEndpoint("wms-order-created-queue", e =>
-        {
-            e.Durable = true;
-            e.AutoDelete = false;
-            e.PurgeOnStartup = false;
-
-            e.UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)));
-
-            e.ConfigureConsumer<OrderCreatedConsumer>(context);
         });
     });
 });
