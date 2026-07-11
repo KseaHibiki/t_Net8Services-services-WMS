@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Serilog;
 using WMS.Domain.Aggregates;
+using WMS.Application.Redis;
 using StackExchange.Redis;
 using System.Text.Json;
 
@@ -11,6 +12,7 @@ namespace WMS.API.Controllers;
 public class InventoryController : ControllerBase
 {
     private readonly IInventoryRepository _inventoryRepository;
+    private readonly IRedisInventoryService _redisInventoryService;
     private readonly IDatabase _redis;
     private readonly IConfiguration _configuration;
 
@@ -21,10 +23,12 @@ public class InventoryController : ControllerBase
 
     public InventoryController(
         IInventoryRepository inventoryRepository,
+        IRedisInventoryService redisInventoryService,
         IConnectionMultiplexer redis,
         IConfiguration configuration)
     {
         _inventoryRepository = inventoryRepository;
+        _redisInventoryService = redisInventoryService;
         _redis = redis.GetDatabase();
         _configuration = configuration;
     }
@@ -87,7 +91,10 @@ public class InventoryController : ControllerBase
         var inventory = Inventory.Create(request.ProductId, request.Quantity);
         await _inventoryRepository.AddAsync(inventory);
 
-        Log.Information("库存初始化成功: ProductId={ProductId}, Quantity={Quantity}",
+        // 同步库存到 Redis（用于高并发预扣减）
+        await _redisInventoryService.InitializeStockAsync(request.ProductId, request.Quantity);
+
+        Log.Information("库存初始化成功（含 Redis 同步）: ProductId={ProductId}, Quantity={Quantity}",
             request.ProductId, request.Quantity);
 
         return CreatedAtAction(nameof(GetInventory), new { productId = inventory.ProductId }, new
@@ -96,6 +103,27 @@ public class InventoryController : ControllerBase
             inventory.ProductId,
             inventory.AvailableQuantity,
             inventory.ReservedQuantity
+        });
+    }
+
+    /// <summary>
+    /// 获取 Redis 实时库存（不经过 DB，用于高并发查询）
+    /// </summary>
+    [HttpGet("{productId:guid}/realtime")]
+    public async Task<IActionResult> GetRealtimeStock(Guid productId)
+    {
+        var stock = await _redisInventoryService.GetStockAsync(productId);
+        if (stock is null)
+        {
+            return NotFound(new { Message = $"Redis stock for product {productId} not found. Please seed inventory first." });
+        }
+
+        return Ok(new
+        {
+            ProductId = productId,
+            Available = stock.Value.Available,
+            Reserved = stock.Value.Reserved,
+            Source = "Redis"
         });
     }
 }

@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Serilog;
 using StackExchange.Redis;
 using WMS.Application.Consumers;
+using WMS.Application.Redis;
 using WMS.Domain.Aggregates;
 using WMS.Infrastructure.Persistence;
 
@@ -30,6 +31,7 @@ builder.Services.AddSwaggerGen();
 var redisConnectionString = builder.Configuration.GetConnectionString("redis")
     ?? "localhost:6379";
 builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect(redisConnectionString));
+builder.Services.AddSingleton<IRedisInventoryService, RedisInventoryService>();
 
 // Database
 var connectionString = builder.Configuration.GetConnectionString("wms")

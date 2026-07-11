@@ -1,6 +1,7 @@
 using MassTransit;
 using Serilog;
 using Shop.Events;
+using WMS.Application.Redis;
 using WMS.Domain.Aggregates;
 
 namespace WMS.Application.Consumers;
@@ -8,10 +9,14 @@ namespace WMS.Application.Consumers;
 public class OrderPaidConsumer : IConsumer<OrderPaidEvent>
 {
     private readonly IInventoryRepository _inventoryRepository;
+    private readonly IRedisInventoryService? _redisInventoryService;
 
-    public OrderPaidConsumer(IInventoryRepository inventoryRepository)
+    public OrderPaidConsumer(
+        IInventoryRepository inventoryRepository,
+        IRedisInventoryService? redisInventoryService = null)
     {
         _inventoryRepository = inventoryRepository;
+        _redisInventoryService = redisInventoryService;
     }
 
     public async Task Consume(ConsumeContext<OrderPaidEvent> context)
@@ -50,6 +55,16 @@ public class OrderPaidConsumer : IConsumer<OrderPaidEvent>
                 await _inventoryRepository.SaveChangesAsync(context.CancellationToken);
                 Log.Information("库存不足 100，自动补充 500 件: ProductId={ProductId}, Available={Available}",
                     evt.ProductId, inventory.AvailableQuantity);
+            }
+
+            // DB 扣减完成后，同步 Redis 库存保持最终一致
+            if (_redisInventoryService is not null)
+            {
+                await _redisInventoryService.SyncFromDbAsync(
+                    evt.ProductId,
+                    inventory.AvailableQuantity,
+                    inventory.ReservedQuantity,
+                    context.CancellationToken);
             }
         }
         catch (InvalidOperationException ex)
