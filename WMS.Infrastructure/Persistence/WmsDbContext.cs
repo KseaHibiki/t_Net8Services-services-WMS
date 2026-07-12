@@ -24,8 +24,8 @@ public class WmsDbContext : DbContext
             b.Property(i => i.ReservedQuantity).IsRequired();
         });
 
-        modelBuilder.AddInboxStateEntity();
-        modelBuilder.AddOutboxMessageEntity();
-        modelBuilder.AddOutboxStateEntity();
+        modelBuilder.AddInboxStateEntity(); // 入站消息去重表
+        modelBuilder.AddOutboxMessageEntity(); // 出站消息持久化
+        modelBuilder.AddOutboxStateEntity(); // 出站批次状态
     }
 }

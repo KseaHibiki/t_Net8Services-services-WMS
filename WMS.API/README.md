@@ -1,79 +1,55 @@
 # WMS.API — 库存微服务（API 层）
 
-WMS 库存微服务的 Web API 表现层，提供库存 HTTP 接口、依赖注入注册、中间件配置和应用启动入口。
+WMS 库存微服务的 Web API 表现层，提供库存 HTTP 接口、DI 注册、中间件配置和应用启动入口。
+
+## 核心职责
+
+| 组件 | 文件 | 说明 |
+|------|------|------|
+| InventoryController | `Controllers/InventoryController.cs` | REST 接口（初始化/查询/实时） |
+| Program.cs | `Program.cs` | DI 注册、MassTransit 配置、中间件、启动入口 |
 
 ## 技术栈
 
-| 技术 | 用途 | 版本 |
-|---|---|---|
-| ASP.NET Core | Web 框架 | 8.0 |
-| Entity Framework Core | ORM | 8.0 |
-| MySQL (Pomelo) | 数据库 | 8.0 |
-| MassTransit | 消息总线 | 8.3.0 |
-| RabbitMQ | 消息队列 | — |
-| Redis (StackExchange) | 缓存 | 2.8.16 |
-| Serilog | 结构化日志 | 8.0 |
-| Swashbuckle | API 文档 | 6.5 |
+| 技术 | 用途 |
+|------|------|
+| ASP.NET Core 8 | Web 框架 |
+| StackExchange.Redis 2.8.16 | Redis 客户端（缓存 + 库存同步） |
+| MassTransit 8.3.0 | 消息总线（Outbox 发件箱） |
+| Serilog 8.0 | 结构化日志 |
+| Swashbuckle 6.5 | API 文档 |
 
 ## API 接口
 
-### POST /api/inventory/seed — 初始化库存
+| 方法 | 路径 | 说明 | 响应 |
+|------|------|------|------|
+| POST | `/api/inventory/seed` | 初始化库存（同步到 Redis） | 201 / 409 |
+| GET | `/api/inventory/{productId}` | 查询库存（Redis 缓存 30s TTL） | 200 / 404 |
+| GET | `/api/inventory/{productId}/realtime` | Redis 实时库存（不经过 DB） | 200 |
 
-为指定商品创建库存记录。已存在的商品返回 409 冲突。
+## 消息队列
 
-**请求体**
-```json
-{
-  "productId": "550e8400-e29b-41d4-a716-446655440000",
-  "quantity": 100
-}
-```
-
-**示例**
-```bash
-curl -X POST http://localhost:53345/api/inventory/seed \
-  -H "Content-Type: application/json" \
-  -d '{"productId":"550e8400-e29b-41d4-a716-446655440000","quantity":100}'
-```
-
-### GET /api/inventory/{productId} — 查询库存
-
-查询指定商品的实时库存，支持 Redis 缓存（TTL: 30s）。
-
-**示例**
-```bash
-curl http://localhost:53345/api/inventory/550e8400-e29b-41d4-a716-446655440000
-```
-
-## 消息队列配置
-
-- 消费队列：`wms-order-paid-queue`
-- 消息重试：3 次，间隔 5 秒
-- Outbox 模式：消息先写入 MySQL，再异步投递到 RabbitMQ
+- **消费队列**: `wms-order-paid-queue`
+- **发布事件**: StockDeductedEvent, StockInsufficientEvent（通过 Outbox）
+- **重试策略**: 3 次间隔 5 秒
 
 ## 日志
 
-- 控制台输出：`[{Timestamp:HH:mm:ss} {Level:u3}] {Service} | {Message}`
-- 文件输出：`logs/wms-api-{yyyyMMdd}.log`（按天滚动）
+- 控制台: `[{HH:mm:ss} {Level:u3}] WMS.API | {Message}`
+- 文件: `logs/wms-api-{yyyyMMdd}.log`（按天滚动）
 
 ## 环境配置
 
-服务通过 `appsettings.json` + `appsettings.{Environment}.json` 实现多环境配置，由 `ASPNETCORE_ENVIRONMENT` 环境变量控制。
-
-| 配置文件 | 环境 | 日志级别 | 数据库连接 | Redis TTL |
-|----------|:----:|:--------:|:----------:|:---------:|
-| `appsettings.json` | 基础 | — | Docker 内部 | 30s |
-| `appsettings.Development.json` | Development | Debug | `localhost:3307` | 120s |
-| `appsettings.Production.json` | Production | Warning | — | 30s |
+| 配置项 | Development | Production |
+|--------|:-----------:|:----------:|
+| 日志级别 | Debug | Warning |
+| 数据库 | `localhost:3307` | Docker 内部 |
+| Redis 库存 TTL | 120s | 30s |
 
 ## 启动
 
 ```bash
-# Development 模式（默认）
 dotnet run --project WMS.API/WMS.API.csproj
-
-# 或指定环境
-ASPNETCORE_ENVIRONMENT=Development dotnet run --project WMS.API/WMS.API.csproj
 ```
 
-Swagger: `http://localhost:53345/swagger`
+Swagger: `http://localhost:5002/swagger`

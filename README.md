@@ -1,162 +1,99 @@
 # WMS 库存微服务
 
-**Warehouse Management System** — 基于 .NET 8 构建的库存管理微服务，采用领域驱动设计（DDD）四层架构，是电商平台中负责库存管理的核心服务。
+**Warehouse Management System** — 基于 .NET 8 构建的库存管理微服务，采用 DDD 四层架构，负责库存初始化、Redis 实时库存同步和支付后库存扣减。
 
-## 架构概览
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  WMS.API          (Web API / 表现层)                      │
-│  - InventoryController   REST 接口                        │
-│  - Program.cs            启动入口（DI、中间件、Swagger）    │
-├──────────────────────────────────────────────────────────┤
-│  WMS.Application   (应用层)                               │
-│  - OrderPaidConsumer     事件消费者（支付后扣库存）          │
-├──────────────────────────────────────────────────────────┤
-│  WMS.Domain        (领域层)                               │
-│  - Inventory             库存聚合根                         │
-│  - IInventoryRepository  仓储接口                          │
-├──────────────────────────────────────────────────────────┤
-│  WMS.Infrastructure (基础设施层)                            │
-│  - WmsDbContext          EF Core 数据库上下文               │
-│  - InventoryRepository   仓储实现                          │
-└──────────────────────────────────────────────────────────┘
-```
+## 架构
 
 | 层 | 项目 | 职责 |
 |---|---|---|
-| Domain | `WMS.Domain` | 聚合根、业务规则、仓储接口 |
-| Application | `WMS.Application` | 事件消费者、编排用例 |
-| Infrastructure | `WMS.Infrastructure` | EF Core 持久化、仓储实现 |
-| API | `WMS.API` | 控制器、依赖注入、Swagger 文档、启动配置 |
+| Domain | `WMS.Domain` | 聚合根 `Inventory`（available + reserved 两阶段模型）、`IInventoryRepository` 接口 |
+| Application | `WMS.Application` | `OrderPaidConsumer`（支付后扣库存）、`RedisInventoryService`（Redis 库存管理） |
+| Infrastructure | `WMS.Infrastructure` | EF Core `WmsDbContext`、`InventoryRepository` 实现 |
+| API | `WMS.API` | `InventoryController`、DI 注册、Swagger、启动入口 |
 
 ## 技术栈
 
-| 技术 | 用途 | 版本 |
-|---|---|---|
-| ASP.NET Core | Web 框架 | 8.0 |
-| Entity Framework Core | ORM | 8.0 |
-| MySQL (Pomelo) | 数据库 | 8.0 |
-| MassTransit | 消息总线 | 8.3.0 |
-| RabbitMQ | 消息队列 | — |
-| Redis (StackExchange) | 缓存 | 2.8.16 |
-| Serilog | 结构化日志 | 8.0 |
-| Swashbuckle | API 文档 | 6.5 |
+| 组件 | 技术 |
+|------|------|
+| 运行时 | .NET 8 (ASP.NET Core) |
+| 数据库 | MySQL 8.0 (via Pomelo.EntityFrameworkCore) |
+| 消息队列 | MassTransit 8.3.0 + RabbitMQ |
+| 缓存 | StackExchange.Redis 2.8.16 |
+| 日志 | Serilog (控制台 + 按天滚动文件) |
+| API 文档 | Swagger / Swashbuckle |
+| 部署 | Docker |
+
+## 核心机制
+
+### 两阶段库存模型
+
+库存采用 **available（可用）+ reserved（预占）** 两阶段模式：
+
+- `Deduct(quantity)` — 预占库存（可用 → 预占）
+- `ConfirmDeduction(quantity)` — 确认扣减（清除预占）
+- `Replenish(quantity)` — 补货（增加可用）
+
+### Redis 库存管理
+
+`RedisInventoryService` 提供 Redis 侧的库存操作，与 Shop 侧 `RedisStockClient` 共享同一套 Lua 脚本和 Key 格式：
+
+| 方法 | 说明 |
+|------|------|
+| `InitializeStockAsync` | Redis 事务 SET NX 初始化 available + reserved |
+| `DeductStockAsync` | Lua 脚本原子预扣减（与 Shop 侧共享同一脚本） |
+| `RefundStockAsync` | Lua 脚本原子回滚 |
+| `GetStockAsync` | 批量 GET available + reserved |
+| `SyncFromDbAsync` | DB 扣减完成后事务 SET 同步回 Redis（最终一致性） |
+
+### Redis 查询缓存
+
+- Key: `inventory:{productId}`，TTL: 30 秒
+- 缓存命中直接返回，未命中查 DB 后写入缓存
+
+### 自动补货
+
+订单支付扣减库存后，若 `AvailableQuantity < 100`，系统自动补货 500 件（测试功能）。
 
 ## 领域模型
 
-### Inventory 库存聚合根
+### Inventory（库存聚合根）
 
-库存采用**两阶段锁定模式**：下单时 `Deduct` 预占库存（可用→预占），订单完成时 `ConfirmDeduction` 释放预占。
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| Id | Guid | 主键 |
+| ProductId | Guid | 商品 ID（唯一索引） |
+| AvailableQuantity | int | 可用库存 |
+| ReservedQuantity | int | 已预占库存 |
 
-```
-┌──────────────────────────────┐
-│         Inventory            │
-├──────────────────────────────┤
-│  Id               : Guid     │
-│  ProductId        : Guid     │
-│  AvailableQuantity : int     │  ← 可用库存
-│  ReservedQuantity  : int     │  ← 已预占库存
-├──────────────────────────────┤
-│  + Create(productId, qty)    │  创建库存
-│  + Deduct(qty)               │  预占库存（可用 → 预占）
-│  + ConfirmDeduction(qty)     │  确认扣减（释放预占）
-│  + Replenish(qty)            │  补货（增加可用）
-└──────────────────────────────┘
-```
-
-**业务规则：**
+**业务规则**:
 - 可用库存不能为负
 - `Deduct` 时可用不足抛 `InvalidOperationException`
 - 数量参数 <= 0 抛 `ArgumentException`
 
-## 事件驱动流程
-
-### 消费的事件
-
-| 事件 | 来源 | 说明 |
-|---|---|---|
-| `OrderPaidEvent` | 订单服务 | 收到支付成功通知后扣减库存 |
-
-### 发布的事件
-
-| 事件 | 去向 | 说明 |
-|---|---|---|
-| `StockDeductedEvent` | 订单服务 | 库存扣减成功 |
-| `StockInsufficientEvent` | 订单服务 | 库存不足，扣减失败 |
-
-### 核心流程
-
-```
-订单服务                          WMS
-    │                              │
-    │  ─ OrderPaidEvent ─────────► │
-    │                              │
-    │                              ├─ 查询库存
-    │                              │
-    │                              ├─ 库存不存在？
-    │                              │   └─ 发布 StockInsufficientEvent
-    │                              │
-    │                              ├─ 库存足够？
-    │                              │   ├─ Deduct(quantity)
-    │                              │   ├─ SaveChanges
-    │                              │   ├─ 发布 StockDeductedEvent
-    │                              │   └─ 可用 < 100？
-    │                              │       └─ Replenish(500)
-    │                              │
-    │                              └─ 库存不足？
-    │                                  └─ 发布 StockInsufficientEvent
-    │                              │
-    │  ◄── StockDeductedEvent ─── │
-    │  ◄── StockInsufficientEvent │
-```
-
-### 消息持久化（Transactional Outbox）
-
-消息采用 **Transactional Outbox 模式**，确保消息不丢失：
-
-```
-Consumer 执行
-    │
-    ├─ 1. 业务变更（EF Core 追踪）
-    ├─ 2. context.Publish(event)  → 消息写入 OutboxMessage 表
-    ├─ 3. SaveChangesAsync
-    │      └─ 业务变更 + OutboxMessage 在同一数据库事务提交
-    │
-    └─ 4. Bus Outbox 后台服务轮询 OutboxMessage 表
-           └─ 投递到 RabbitMQ → 删除已投递记录
-```
-
-**数据库中自动创建的表（通过 `EnsureCreated`）：**
-
-| 表名 | 用途 |
-|---|---|
-| `InboxState` | 消息去重（入站幂等性） |
-| `OutboxMessage` | 待投递消息存储 |
-| `OutboxState` | 投递批次跟踪 |
-
-**配置特性：**
-- 重试策略：`UseMessageRetry(r => r.Interval(3, TimeSpan.FromSeconds(5)))` — 失败 3 次，每次间隔 5 秒
-- 队列配置：`Durable = true`，消息持久化到磁盘
-
 ## API 接口
 
-### GET /api/Inventory/{productId} — 查询库存
+| 方法 | 路径 | 说明 | 响应 |
+|------|------|------|------|
+| POST | `/api/inventory/seed` | 初始化库存（同步到 Redis） | 201 / 409 |
+| GET | `/api/inventory/{productId}` | 查询库存（带 Redis 缓存） | 200 / 404 |
+| GET | `/api/inventory/{productId}/realtime` | Redis 实时库存（不经过 DB） | 200 |
 
-查询指定商品的实时库存。
+### POST `/api/inventory/seed` — 初始化库存
 
-**路径参数：**
+**请求体**:
+```json
+{
+  "productId": "550e8400-e29b-41d4-a716-446655440000",
+  "quantity": 100
+}
+```
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| productId | guid | 商品 ID |
+**响应 201**: 库存已创建并同步到 Redis
+**响应 409**: 该商品库存已存在
 
-**缓存逻辑：**
-1. 先查 Redis（Key: `inventory:{productId}`, TTL: 30s）
-2. 缓存命中 → 直接返回
-3. 缓存未命中 → 查数据库 → 写入缓存后返回
+### GET `/api/inventory/{productId}` — 查询库存
 
-**响应 200：**
+**响应 200**:
 ```json
 {
   "id": "a1b2c3d4-...",
@@ -166,169 +103,73 @@ Consumer 执行
 }
 ```
 
-**响应 404：**
-```json
-{
-  "message": "Inventory for product 550e8400-... not found."
-}
+### GET `/api/inventory/{productId}/realtime` — 实时库存
+
+直接从 Redis 读取 `stock:available:{id}` 和 `stock:reserved:{id}`，不经过数据库，适合高频率监控场景。
+
+## 事件驱动
+
+### 消费事件
+
+| 事件 | 来源 | 消费者 | 行为 |
+|------|------|--------|------|
+| OrderPaidEvent | Payment 服务 | OrderPaidConsumer | 查询库存 → Deduct → 发布 StockDeductedEvent |
+
+### 发布事件
+
+| 事件 | 目标 | 触发时机 |
+|------|------|----------|
+| StockDeductedEvent | Shop 服务 | 库存扣减成功 |
+| StockInsufficientEvent | Shop 服务 | 库存不足，扣减失败（当前无消费者处理） |
+
+### 消息可靠性
+
+- MassTransit **EntityFramework Outbox** 模式（MySQL）
+- `AddInboxStateEntity()` 入站消息去重
+- 重试策略：3 次间隔 5 秒
+- 队列：Durable=true, AutoDelete=false, PurgeOnStartup=false
+
+## 并发保护
+
+| 机制 | 位置 |
+|------|------|
+| MassTransit Inbox 消息去重 | OrderPaidConsumer |
+| ProductId 唯一索引 | 数据库层 |
+
+## 依赖关系
+
 ```
-
-### POST /api/Inventory/seed — 初始化库存
-
-为商品播种初始库存。
-
-**请求体：**
-```json
-{
-  "productId": "550e8400-e29b-41d4-a716-446655440000",
-  "quantity": 100
-}
+WMS.API
+  ├── WMS.Infrastructure
+  │     ├── WMS.Application
+  │     │     └── WMS.Domain
+  │     └── WMS.Domain
+  └── shared/Shop.Events
 ```
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| productId | guid | 是 | 商品 ID |
-| quantity | int | 是 | 初始库存数量 |
-
-**响应 201：** 库存已创建
-**响应 409：** 该商品库存已存在
-
-## 自动补货（测试功能）
-
-订单支付扣减库存后，若商品的 `AvailableQuantity < 100`，系统自动补货 500 件。
-
-```csharp
-if (inventory.AvailableQuantity < 100)
-{
-    inventory.Replenish(500);
-    await _inventoryRepository.UpdateAsync(inventory);
-    await _inventoryRepository.SaveChangesAsync();
-}
-```
-
-此功能用于测试低库存场景下自动补货的完整链路。
-
-## 本地运行
-
-### 前置依赖
-
-- Docker（MySQL + RabbitMQ + Redis）
-- .NET 8 SDK
-
-### 启动依赖服务
-
-```bash
-# 启动 MySQL (3307)、RabbitMQ (5672)、Redis (6379)
-docker run -d --name wms-mysql -p 3307:3306 -e MYSQL_ROOT_PASSWORD=114514 -e MYSQL_DATABASE=wms_db mysql:8
-docker run -d --name wms-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:4-management
-docker run -d --name wms-redis -p 6379:6379 redis:7
-```
-
-### 启动服务
-
-```bash
-cd services/WMS/src
-dotnet run --project WMS.API/WMS.API.csproj
-
-# 默认启动环境变量
-ASPNETCORE_ENVIRONMENT=Development
-```
-
-API 地址：`http://localhost:53345/swagger`
 
 ## 环境配置
 
-服务通过 `appsettings.json` + `appsettings.{Environment}.json` 实现多环境配置，由 `ASPNETCORE_ENVIRONMENT` 环境变量控制。
+| 配置项 | Development | Production |
+|--------|:-----------:|:----------:|
+| 日志级别 | Debug | Warning |
+| 数据库连接 | `localhost:3307` | Docker 内部 (环境变量覆写) |
+| Redis 库存 TTL | 120s | 30s |
 
-| 配置文件 | 适用环境 | 日志级别 | EF Core SQL 日志 | 数据库连接 | Redis 库存 TTL |
-|----------|:--------:|:--------:|:----------------:|:----------:|:--------------:|
-| `appsettings.json` | 基础公共 | — | — | Docker 内部 `wms-mysql` | 30s |
-| `appsettings.Development.json` | Development | Debug | 开启 | `localhost:3307` | 120s |
-| `appsettings.Production.json` | Production | Warning | 关闭 | Docker 内部 (环境变量覆写) | 30s |
+## 本地运行
 
-> `docker-compose.yml` 中设置 `ASPNETCORE_ENVIRONMENT=Development`，`docker-compose.prod.yml` 中设置为 `Production`。
-> 生产环境连接字符串通过 Docker 环境变量 `ConnectionStrings__wms`、`ConnectionStrings__rabbitmq` 等覆写。
-
-### 连接字符串配置
-
-基础 `appsettings.json`：
-
-```json
-{
-  "ConnectionStrings": {
-    "wms": "Server=wms-mysql;Port=3306;Database=wms_db;User=root;Password=114514;",
-    "rabbitmq": "amqp://guest:guest@rabbitmq:5672/",
-    "redis": "localhost:6379"
-  },
-  "RedisCache": {
-    "InventoryTtlSeconds": 30
-  }
-}
+```bash
+dotnet run --project services/WMS/src/WMS.API/WMS.API.csproj
 ```
 
-Development 环境 (`appsettings.Development.json`) 自动覆写为本地地址：
+Docker Compose 方式（推荐）：
 
-```json
-{
-  "ConnectionStrings": {
-    "wms": "Server=localhost;Port=3307;Database=wms_db;User=root;Password=114514;"
-  }
-}
+```bash
+docker-compose up -d wms-api
 ```
 
-## 项目结构
+## 数据库
 
-```
-services/WMS/src/
-├── WMS.API/                        # API 表现层
-│   ├── Controllers/
-│   │   └── InventoryController.cs  库存 REST 接口
-│   ├── Program.cs                  启动入口
-│   ├── Dockerfile                  容器镜像
-│   ├── appsettings.json            应用配置
-│   └── WMS.API.csproj
-│
-├── WMS.Application/                # 应用层
-│   ├── Consumers/
-│   │   └── OrderPaidConsumer.cs    订单支付事件消费者
-│   └── WMS.Application.csproj
-│
-├── WMS.Domain/                     # 领域层
-│   ├── Aggregates/
-│   │   ├── Inventory.cs            库存聚合根
-│   │   └── IInventoryRepository.cs 仓储接口
-│   └── WMS.Domain.csproj
-│
-├── WMS.Infrastructure/             # 基础设施层
-│   └── Persistence/
-│       ├── WmsDbContext.cs         EF Core 数据库上下文
-│       └── InventoryRepository.cs  仓储实现
-│
-└── shared/
-    └── Shop.Events/                # 共享事件定义
-        ├── OrderPaidEvent.cs       订单已支付
-        ├── StockDeductedEvent.cs   库存已扣减
-        ├── StockInsufficientEvent.cs 库存不足
-        ├── OrderCreatedEvent.cs    订单已创建
-        └── OrderCompletedEvent.cs  订单已完成
-
-```
-
-## 数据库表结构
-
-### inventories
-
-| 字段 | 类型 | 约束 | 说明 |
-|---|---|---|---|
-| Id | char(36) | PK | 主键 |
-| ProductId | char(36) | UNIQUE, NOT NULL | 商品 ID（唯一索引） |
-| AvailableQuantity | int | NOT NULL | 可用库存 |
-| ReservedQuantity | int | NOT NULL | 已预占库存 |
-
-### MassTransit Outbox 表
-
-| 表名 | 说明 |
-|---|---|
-| MassTransitInboxState | 入站消息去重 |
-| MassTransitOutboxMessage | 出站消息持久化 |
-| MassTransitOutboxState | 出站批次状态 |
+- 数据库：wms_db（MySQL 8.0，端口 3307）
+- 表：inventories, MassTransitInboxState, MassTransitOutboxMessage, MassTransitOutboxState
+- ORM：Entity Framework Core（Code-First）
+- 启动时自动创建表（`EnsureCreated`）
